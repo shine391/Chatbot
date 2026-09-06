@@ -1,0 +1,45 @@
+﻿# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*.class
+
+# Caches and logs
+*.log
+.coverage
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual Environment
+venv/
+env/
+ENV/
+.venv/
+
+# Environment Variables & Secrets (CRITICAL)
+.env
+*.env.local
+
+# Local Data, SQLite databases, and Uploads
+data/*.db
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm
+data/backups/*
+!data/backups/.gitkeep
+!data/.gitkeep
+static/uploads/*
+!static/uploads/.gitkeep
+
+# Internal Agent Workspaces & Logs
+.agents/
+ORIGINAL_REQUEST.md
+
+# IDE & OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
