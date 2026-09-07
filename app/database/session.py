@@ -159,13 +159,48 @@ async def init_db(engine: AsyncEngine | None = None) -> None:
                                 )
                             )
 
-                # Migrate admin_users is_superadmin column
+                # Migrate admin_users columns
                 if "admin_users" in existing_tables:
                     au_cols = {c["name"] for c in inspector.get_columns("admin_users")}
                     if "is_superadmin" not in au_cols:
                         connection.execute(
                             text("ALTER TABLE admin_users ADD COLUMN is_superadmin BOOLEAN DEFAULT FALSE")
                         )
+                    if "email" not in au_cols:
+                        connection.execute(
+                            text("ALTER TABLE admin_users ADD COLUMN email VARCHAR(255)")
+                        )
+                    if "phone" not in au_cols:
+                        connection.execute(
+                            text("ALTER TABLE admin_users ADD COLUMN phone VARCHAR(50)")
+                        )
+                    if "created_by_id" not in au_cols:
+                        connection.execute(
+                            text("ALTER TABLE admin_users ADD COLUMN created_by_id INTEGER")
+                        )
+
+                # Migrate orders shipping columns
+                if "orders" in existing_tables:
+                    o_cols = {c["name"] for c in inspector.get_columns("orders")}
+                    order_shipping_fields = [
+                        ("recipient_name", "VARCHAR(200)"),
+                        ("recipient_phone", "VARCHAR(50)"),
+                        ("shipping_address", "VARCHAR(500)"),
+                        ("province", "VARCHAR(100)"),
+                        ("district", "VARCHAR(100)"),
+                        ("ward", "VARCHAR(100)"),
+                        ("weight_grams", "INTEGER DEFAULT 500"),
+                        ("cod_amount", "FLOAT DEFAULT 0.0"),
+                        ("carrier", "VARCHAR(50)"),
+                        ("tracking_code", "VARCHAR(100)"),
+                        ("shipping_fee", "FLOAT DEFAULT 0.0"),
+                        ("carrier_status_text", "VARCHAR(200)"),
+                    ]
+                    for col_name, col_type in order_shipping_fields:
+                        if col_name not in o_cols:
+                            connection.execute(
+                                text(f"ALTER TABLE orders ADD COLUMN {col_name} {col_type}")
+                            )
 
                 # Migrate conversations table
                 if "conversations" in existing_tables:
