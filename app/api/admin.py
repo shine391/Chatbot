@@ -58,6 +58,7 @@ from app.models.order import Order, OrderStatus
 from app.models.product import Category, Product
 from app.models.quick_reply import QuickReply
 from app.models.setting import SettingCategory
+from app.models.tenant import Tenant
 from app.models.user import AdminUser
 from app.schemas.broadcast import (
     BroadcastCampaignCreate,
@@ -197,7 +198,8 @@ async def admin_login(
     user.last_login_at = datetime.now(timezone.utc)
 
     settings = get_settings()
-    token_data = {"sub": user.username, "role": user.role}
+    tenant_id = getattr(user, "tenant_id", None) or "default-system-tenant"
+    token_data = {"sub": user.username, "role": user.role, "tenant_id": tenant_id}
     access_token = create_access_token(token_data)
     refresh_token = create_refresh_token(token_data)
 
@@ -210,6 +212,8 @@ async def admin_login(
             "username": user.username,
             "display_name": user.display_name,
             "role": user.role,
+            "tenant_id": tenant_id,
+            "is_superadmin": getattr(user, "is_superadmin", False),
         },
     }
 
@@ -234,7 +238,8 @@ async def refresh_access_token(
         raise HTTPException(status_code=401, detail="Tài khoản không hợp lệ.")
 
     settings = get_settings()
-    new_access = create_access_token({"sub": user.username, "role": user.role})
+    tenant_id = getattr(user, "tenant_id", None) or "default-system-tenant"
+    new_access = create_access_token({"sub": user.username, "role": user.role, "tenant_id": tenant_id})
     return {
         "access_token": new_access,
         "token_type": "bearer",
@@ -251,10 +256,45 @@ async def get_current_admin_info(
         "username": current_user.username,
         "display_name": current_user.display_name,
         "role": current_user.role,
+        "tenant_id": getattr(current_user, "tenant_id", "default-system-tenant"),
+        "is_superadmin": getattr(current_user, "is_superadmin", False),
         "last_login_at": current_user.last_login_at.isoformat()
         if current_user.last_login_at
         else None,
     }
+
+
+@router.get("/tenant/info")
+async def get_current_tenant_info(
+    current_user: AdminUser = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict[str, Any]:
+    """Get metadata for the currently active tenant workspace."""
+    tenant_id = getattr(current_user, "tenant_id", None) or "default-system-tenant"
+    stmt = select(Tenant).where(Tenant.id == tenant_id)
+    res = await session.execute(stmt)
+    tenant = res.scalar_one_or_none()
+    if tenant is None:
+        return {
+            "id": tenant_id,
+            "name": "Default Workspace",
+            "slug": "default",
+            "status": "active",
+            "subscription_tier": "enterprise",
+            "subscription_expires_at": None,
+        }
+    return {
+        "id": tenant.id,
+        "name": tenant.name,
+        "slug": tenant.slug,
+        "status": tenant.status,
+        "subscription_tier": tenant.subscription_tier,
+        "subscription_expires_at": tenant.subscription_expires_at.isoformat()
+        if tenant.subscription_expires_at
+        else None,
+        "created_at": tenant.created_at.isoformat(),
+    }
+
 
 
 # ===========================================================================
@@ -446,8 +486,12 @@ async def list_products(
     session: AsyncSession = Depends(get_db_session),
     _user: AdminUser = Depends(get_current_user),
 ) -> PaginatedResponse[ProductDetail]:
+    tenant_id = getattr(_user, "tenant_id", None) or "default-system-tenant"
     count_stmt = select(func.count(Product.id))
     stmt = select(Product)
+    if not getattr(_user, "is_superadmin", False):
+        count_stmt = count_stmt.where(Product.tenant_id == tenant_id)
+        stmt = stmt.where(Product.tenant_id == tenant_id)
     if category_id is not None:
         count_stmt = count_stmt.where(Product.category_id == category_id)
         stmt = stmt.where(Product.category_id == category_id)
@@ -496,12 +540,14 @@ async def create_product(
     session: AsyncSession = Depends(get_db_session),
     _user: AdminUser = Depends(require_roles("admin", "manager")),
 ) -> ProductDetail:
+    tenant_id = getattr(_user, "tenant_id", None) or "default-system-tenant"
     stmt = select(Product).where(Product.sku == data.sku.upper())
     existing = (await session.execute(stmt)).scalar_one_or_none()
     if existing:
         raise HTTPException(status_code=400, detail="SKU already exists")
 
     prod = Product(
+        tenant_id=tenant_id,
         sku=data.sku.upper(),
         name=data.name,
         description=data.description,
@@ -1695,8 +1741,12 @@ async def list_customers(
     session: AsyncSession = Depends(get_db_session),
     _user: AdminUser = Depends(get_current_user),
 ) -> PaginatedResponse[CustomerDetail]:
+    tenant_id = getattr(_user, "tenant_id", None) or "default-system-tenant"
     count_stmt = select(func.count(Customer.id))
     stmt = select(Customer)
+    if not getattr(_user, "is_superadmin", False):
+        count_stmt = count_stmt.where(Customer.tenant_id == tenant_id)
+        stmt = stmt.where(Customer.tenant_id == tenant_id)
     if funnel_stage:
         count_stmt = count_stmt.where(Customer.funnel_stage == funnel_stage)
         stmt = stmt.where(Customer.funnel_stage == funnel_stage)
@@ -1773,6 +1823,7 @@ async def export_customers_csv(
     session: AsyncSession = Depends(get_db_session),
     _user: AdminUser = Depends(require_roles("admin", "manager")),
 ) -> Response:
+    tenant_id = getattr(_user, "tenant_id", None) or "default-system-tenant"
     stmt = (
         select(
             Customer,
@@ -1780,9 +1831,10 @@ async def export_customers_csv(
             func.coalesce(func.sum(Order.total_amount), 0.0).label("total_spent"),
         )
         .outerjoin(Order, Customer.id == Order.customer_id)
-        .group_by(Customer.id)
-        .order_by(Customer.id.asc())
     )
+    if not getattr(_user, "is_superadmin", False):
+        stmt = stmt.where(Customer.tenant_id == tenant_id)
+    stmt = stmt.group_by(Customer.id).order_by(Customer.id.asc())
     rows = (await session.execute(stmt)).all()
 
     output = io.StringIO()
@@ -2034,7 +2086,10 @@ async def list_orders(
     session: AsyncSession = Depends(get_db_session),
     _user: AdminUser = Depends(get_current_user),
 ) -> PaginatedResponse[OrderDetail]:
+    tenant_id = getattr(_user, "tenant_id", None) or "default-system-tenant"
     base_filter: list[Any] = []
+    if not getattr(_user, "is_superadmin", False):
+        base_filter.append(Order.tenant_id == tenant_id)
     if status is not None:
         base_filter.append(Order.status == status)
     if customer_id is not None:
@@ -2117,11 +2172,14 @@ async def export_orders_csv(
     session: AsyncSession = Depends(get_db_session),
     _user: AdminUser = Depends(require_roles("admin", "manager")),
 ) -> Response:
+    tenant_id = getattr(_user, "tenant_id", None) or "default-system-tenant"
     stmt = (
         select(Order, Customer.name, Customer.phone, Customer.platform)
         .join(Customer, Order.customer_id == Customer.id)
-        .order_by(Order.ordered_at.desc())
     )
+    if not getattr(_user, "is_superadmin", False):
+        stmt = stmt.where(Order.tenant_id == tenant_id)
+    stmt = stmt.order_by(Order.ordered_at.desc())
     rows = (await session.execute(stmt)).all()
     vietqr = await VietQRService.from_settings(session)
 
@@ -2337,7 +2395,10 @@ async def list_quick_replies(
     _user: AdminUser = Depends(get_current_user),
 ) -> list[QuickReplyDetail]:
     """List all quick reply canned templates."""
+    tenant_id = getattr(_user, "tenant_id", None) or "default-system-tenant"
     stmt = select(QuickReply)
+    if not getattr(_user, "is_superadmin", False):
+        stmt = stmt.where(QuickReply.tenant_id == tenant_id)
     if category:
         stmt = stmt.where(QuickReply.category == category)
     if search:
@@ -2359,9 +2420,13 @@ async def create_quick_reply(
     _user: AdminUser = Depends(get_current_user),
 ) -> QuickReplyDetail:
     """Create a new quick reply template."""
+    tenant_id = getattr(_user, "tenant_id", None) or "default-system-tenant"
     existing = (
         await session.execute(
-            select(QuickReply).where(QuickReply.shortcut == data.shortcut.strip())
+            select(QuickReply).where(
+                QuickReply.shortcut == data.shortcut.strip(),
+                QuickReply.tenant_id == tenant_id,
+            )
         )
     ).scalar_one_or_none()
     if existing:
@@ -2371,6 +2436,7 @@ async def create_quick_reply(
         )
 
     qr = QuickReply(
+        tenant_id=tenant_id,
         title=data.title.strip(),
         shortcut=data.shortcut.strip(),
         content=data.content.strip(),

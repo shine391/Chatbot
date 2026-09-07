@@ -20,6 +20,12 @@ from app.models.order import Order, OrderStatus
 from app.models.product import Category, Product
 from app.models.quick_reply import QuickReply
 from app.models.setting import SettingCategory, SystemSetting
+from app.models.tenant import (
+    DEFAULT_TENANT_ID,
+    SubscriptionTier,
+    Tenant,
+    TenantStatus,
+)
 from app.models.user import AdminUser, UserRole
 
 __all__ = [
@@ -31,6 +37,7 @@ __all__ = [
     "Conversation",
     "ConversationStatus",
     "Customer",
+    "DEFAULT_TENANT_ID",
     "GuardrailLog",
     "KnowledgeItem",
     "Message",
@@ -43,6 +50,10 @@ __all__ = [
     "QuickReply",
     "RecipientStatus",
     "SettingCategory",
+    "SubscriptionTier",
     "SystemSetting",
+    "Tenant",
+    "TenantStatus",
     "UserRole",
 ]
+

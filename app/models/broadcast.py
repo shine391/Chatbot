@@ -35,6 +35,9 @@ class BroadcastCampaign(Base):
     __tablename__ = "broadcast_campaigns"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("tenants.id", ondelete="CASCADE"), default="default-system-tenant", index=True
+    )
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     channel: Mapped[str] = mapped_column(String(50), default="facebook")
     message_content: Mapped[str] = mapped_column(Text, nullable=False)
@@ -66,6 +69,9 @@ class BroadcastRecipient(Base):
     __tablename__ = "broadcast_recipients"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("tenants.id", ondelete="CASCADE"), default="default-system-tenant", index=True
+    )
     campaign_id: Mapped[int] = mapped_column(
         ForeignKey("broadcast_campaigns.id", ondelete="CASCADE"), nullable=False, index=True
     )

@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, Integer, String, Text, func
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database.session import Base
@@ -14,6 +14,9 @@ class QuickReply(Base):
     __tablename__ = "quick_replies"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("tenants.id", ondelete="CASCADE"), default="default-system-tenant", index=True
+    )
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     shortcut: Mapped[str] = mapped_column(String(50), nullable=False, unique=True, index=True)
     content: Mapped[str] = mapped_column(Text, nullable=False)

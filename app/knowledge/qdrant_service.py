@@ -57,16 +57,21 @@ class QdrantVectorService:
         self,
         collection_name: str,
         points: list[dict[str, Any]],
+        tenant_id: str = "default-system-tenant",
     ) -> None:
-        """Upsert points into a given collection."""
-        struct_points = [
-            PointStruct(
-                id=p["id"],
-                vector=p["vector"],
-                payload=p.get("payload", {}),
+        """Upsert points into a given collection with tenant isolation."""
+        struct_points = []
+        for p in points:
+            payload = dict(p.get("payload", {}))
+            if "tenant_id" not in payload:
+                payload["tenant_id"] = tenant_id
+            struct_points.append(
+                PointStruct(
+                    id=p["id"],
+                    vector=p["vector"],
+                    payload=payload,
+                )
             )
-            for p in points
-        ]
         self.client.upsert(
             collection_name=collection_name,
             points=struct_points,
@@ -77,20 +82,28 @@ class QdrantVectorService:
         collection_name: str,
         query_vector: list[float],
         limit: int = 4,
+        tenant_id: str | None = None,
         filter_key: str | None = None,
         filter_value: Any = None,
     ) -> list[dict[str, Any]]:
-        """Perform cosine similarity vector search with optional payload filter."""
-        query_filter = None
-        if filter_key is not None and filter_value is not None:
-            query_filter = Filter(
-                must=[
-                    FieldCondition(
-                        key=filter_key,
-                        match=MatchValue(value=filter_value),
-                    )
-                ]
+        """Perform cosine similarity vector search with optional tenant isolation and payload filter."""
+        must_conditions: list[Any] = []
+        if tenant_id is not None:
+            must_conditions.append(
+                FieldCondition(
+                    key="tenant_id",
+                    match=MatchValue(value=tenant_id),
+                )
             )
+        if filter_key is not None and filter_value is not None:
+            must_conditions.append(
+                FieldCondition(
+                    key=filter_key,
+                    match=MatchValue(value=filter_value),
+                )
+            )
+
+        query_filter = Filter(must=must_conditions) if must_conditions else None
 
         response = self.client.query_points(
             collection_name=collection_name,

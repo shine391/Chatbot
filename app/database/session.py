@@ -121,6 +121,52 @@ async def init_db(engine: AsyncEngine | None = None) -> None:
                 inspector = inspect(connection)
                 existing_tables = set(inspector.get_table_names())
 
+                # Seed default tenant
+                if "tenants" in existing_tables:
+                    try:
+                        connection.execute(
+                            text(
+                                "INSERT INTO tenants (id, name, slug, status, subscription_tier, created_at, updated_at) "
+                                "VALUES ('default-system-tenant', 'Hệ Thống Mặc Định', 'default', 'active', 'enterprise', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) "
+                                "ON CONFLICT (id) DO NOTHING"
+                            )
+                        )
+                    except Exception:
+                        pass
+
+                # Migrate tenant_id on all multi-tenant tables
+                tenant_tables = [
+                    "admin_users",
+                    "categories",
+                    "products",
+                    "customers",
+                    "conversations",
+                    "messages",
+                    "orders",
+                    "quick_replies",
+                    "broadcast_campaigns",
+                    "broadcast_recipients",
+                    "system_settings",
+                    "knowledge_items",
+                ]
+                for tbl in tenant_tables:
+                    if tbl in existing_tables:
+                        cols = {c["name"] for c in inspector.get_columns(tbl)}
+                        if "tenant_id" not in cols:
+                            connection.execute(
+                                text(
+                                    f"ALTER TABLE {tbl} ADD COLUMN tenant_id VARCHAR(36) DEFAULT 'default-system-tenant'"
+                                )
+                            )
+
+                # Migrate admin_users is_superadmin column
+                if "admin_users" in existing_tables:
+                    au_cols = {c["name"] for c in inspector.get_columns("admin_users")}
+                    if "is_superadmin" not in au_cols:
+                        connection.execute(
+                            text("ALTER TABLE admin_users ADD COLUMN is_superadmin BOOLEAN DEFAULT FALSE")
+                        )
+
                 # Migrate conversations table
                 if "conversations" in existing_tables:
                     cols = {c["name"] for c in inspector.get_columns("conversations")}
@@ -301,8 +347,8 @@ async def init_db(engine: AsyncEngine | None = None) -> None:
                     hashed = _hash_pw(app_cfg.admin_default_password)
                     connection.execute(
                         text(
-                            "INSERT INTO admin_users (username, hashed_password, display_name, role, is_active, created_at) "
-                            "VALUES (:username, :hashed_pw, :display_name, :role, TRUE, CURRENT_TIMESTAMP) "
+                            "INSERT INTO admin_users (username, hashed_password, display_name, role, is_active, is_superadmin, tenant_id, created_at) "
+                            "VALUES (:username, :hashed_pw, :display_name, :role, TRUE, TRUE, 'default-system-tenant', CURRENT_TIMESTAMP) "
                             "ON CONFLICT (username) DO NOTHING"
                         ),
                         {

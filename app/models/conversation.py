@@ -45,6 +45,9 @@ class Conversation(Base):
     __tablename__ = "conversations"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("tenants.id", ondelete="CASCADE"), default="default-system-tenant", index=True
+    )
     customer_id: Mapped[int] = mapped_column(ForeignKey("customers.id"), nullable=False)
     channel: Mapped[str] = mapped_column(String(50), nullable=False)
     status: Mapped[str] = mapped_column(Enum(ConversationStatus), default=ConversationStatus.ACTIVE)
@@ -68,6 +71,9 @@ class Message(Base):
     __tablename__ = "messages"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("tenants.id", ondelete="CASCADE"), default="default-system-tenant", index=True
+    )
     conversation_id: Mapped[int] = mapped_column(ForeignKey("conversations.id"), nullable=False)
     role: Mapped[str] = mapped_column(Enum(MessageRole), nullable=False)
     content: Mapped[str | None] = mapped_column(Text)

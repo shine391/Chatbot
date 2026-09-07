@@ -77,6 +77,8 @@ class MessageDeduplicator:
                 return False
             except Exception as exc:
                 logger.warning("Redis dedup check error, falling back to memory: %s", exc)
+                self._redis_failed = True
+                self._redis_client = None
 
         # 2. In-memory fallback dictionary: {cache_key: expire_timestamp}
         now = time.time()

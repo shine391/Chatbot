@@ -29,6 +29,9 @@ class Order(Base):
     __tablename__ = "orders"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("tenants.id", ondelete="CASCADE"), default="default-system-tenant", index=True
+    )
     customer_id: Mapped[int] = mapped_column(ForeignKey("customers.id"), nullable=False)
     status: Mapped[str] = mapped_column(Enum(OrderStatus), default=OrderStatus.PENDING)
     total_amount: Mapped[float] = mapped_column(Float, nullable=False)

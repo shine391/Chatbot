@@ -44,6 +44,8 @@ def create_access_token(
     expire_min = expires_minutes or settings.jwt_access_token_expire_minutes
     expire = datetime.now(timezone.utc) + timedelta(minutes=expire_min)
     to_encode.update({"exp": expire, "type": "access"})
+    if "tenant_id" not in to_encode:
+        to_encode["tenant_id"] = "default-system-tenant"
     encoded_jwt: str = jwt.encode(
         to_encode,
         settings.jwt_secret_key,
@@ -58,6 +60,8 @@ def create_refresh_token(data: dict[str, Any]) -> str:
     to_encode = data.copy()
     expire = datetime.now(timezone.utc) + timedelta(days=7)
     to_encode.update({"exp": expire, "type": "refresh"})
+    if "tenant_id" not in to_encode:
+        to_encode["tenant_id"] = "default-system-tenant"
     encoded_jwt: str = jwt.encode(
         to_encode,
         settings.jwt_secret_key,
@@ -148,3 +152,23 @@ def require_roles(*allowed_roles: str) -> Any:
         )
 
     return role_checker
+
+
+async def get_current_tenant(
+    current_user: AdminUser = Depends(get_current_user),
+) -> str:
+    """Dependency extracting the tenant_id for the current request context."""
+    return getattr(current_user, "tenant_id", None) or "default-system-tenant"
+
+
+async def require_superadmin(
+    current_user: AdminUser = Depends(get_current_user),
+) -> AdminUser:
+    """Dependency ensuring current user has platform superadmin privilege."""
+    if not getattr(current_user, "is_superadmin", False):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Thao tác này yêu cầu quyền Superadmin nền tảng.",
+        )
+    return current_user
+
