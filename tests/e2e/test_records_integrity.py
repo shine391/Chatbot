@@ -137,6 +137,8 @@ async def compute_table_baseline_fingerprint(
         for r in row_dicts:
             clean_r = {}
             for k, v in r.items():
+                if k == "tenant_id":
+                    continue
                 if hasattr(v, "isoformat"):
                     clean_r[k] = v.isoformat()
                 else:

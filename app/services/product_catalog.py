@@ -12,8 +12,9 @@ from app.schemas.product import CatalogResponse, ProductCard, ProductDetail
 class ProductCatalogService(BaseProductCatalog):
     """Database-backed service for searching products and generating 3-4 item catalog responses."""
 
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(self, session: AsyncSession, tenant_id: str = "default-system-tenant") -> None:
         self.session = session
+        self.tenant_id = tenant_id
 
     def _to_detail(self, product: Product) -> ProductDetail:
         category_name = product.category.name if product.category else None
@@ -38,7 +39,11 @@ class ProductCatalogService(BaseProductCatalog):
         stmt = (
             select(Product)
             .options(selectinload(Product.category))
-            .where(Product.sku == clean_sku, Product.is_active.is_(True))
+            .where(
+                Product.sku == clean_sku,
+                Product.is_active.is_(True),
+                Product.tenant_id == self.tenant_id,
+            )
         )
         result = await self.session.execute(stmt)
         product = result.scalar_one_or_none()
@@ -54,6 +59,7 @@ class ProductCatalogService(BaseProductCatalog):
             .options(selectinload(Product.category))
             .where(
                 Product.is_active.is_(True),
+                Product.tenant_id == self.tenant_id,
                 or_(
                     Product.name.ilike(term),
                     Product.description.ilike(term),
@@ -72,7 +78,10 @@ class ProductCatalogService(BaseProductCatalog):
         clamped_limit = max(1, min(4, limit))
 
         # Find category
-        cat_stmt = select(Category).where(Category.slug == category_slug)
+        cat_stmt = select(Category).where(
+            Category.slug == category_slug,
+            Category.tenant_id == self.tenant_id,
+        )
         cat_res = await self.session.execute(cat_stmt)
         category = cat_res.scalar_one_or_none()
 
@@ -80,7 +89,10 @@ class ProductCatalogService(BaseProductCatalog):
         cat_title = category.name if category else category_slug
 
         # Fetch products
-        prod_stmt = select(Product).where(Product.is_active.is_(True))
+        prod_stmt = select(Product).where(
+            Product.is_active.is_(True),
+            Product.tenant_id == self.tenant_id,
+        )
         if cat_id is not None:
             prod_stmt = prod_stmt.where(Product.category_id == cat_id)
 

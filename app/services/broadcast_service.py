@@ -58,8 +58,14 @@ class BroadcastService:
         "ACCOUNT_UPDATE",
     }
 
-    def __init__(self, session: AsyncSession, rate_limit_per_sec: float = 10.0) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        rate_limit_per_sec: float = 10.0,
+        tenant_id: str = "default-system-tenant",
+    ) -> None:
         self.session = session
+        self.tenant_id = tenant_id
         self.rate_limiter = TokenBucketRateLimiter(
             rate=rate_limit_per_sec, capacity=rate_limit_per_sec
         )
@@ -67,6 +73,7 @@ class BroadcastService:
     async def create_campaign(self, data: BroadcastCampaignCreate) -> BroadcastCampaign:
         """Create a new broadcast campaign and populate eligible recipients."""
         campaign = BroadcastCampaign(
+            tenant_id=self.tenant_id,
             name=data.name,
             channel=data.channel,
             message_content=data.message_content,
@@ -78,8 +85,8 @@ class BroadcastService:
         self.session.add(campaign)
         await self.session.flush()
 
-        # Build customer query based on filter criteria
-        stmt = select(Customer)
+        # Build customer query based on filter criteria, strictly isolated to the tenant
+        stmt = select(Customer).where(Customer.tenant_id == self.tenant_id)
         if data.channel:
             stmt = stmt.where(Customer.platform == data.channel)
 
@@ -94,6 +101,7 @@ class BroadcastService:
         for cust in customers:
             recipients.append(
                 BroadcastRecipient(
+                    tenant_id=self.tenant_id,
                     campaign_id=campaign.id,
                     customer_id=cust.id,
                     recipient_identifier=cust.platform_user_id,
@@ -107,13 +115,16 @@ class BroadcastService:
         await self.session.refresh(campaign)
 
         logger.info(
-            f"Created Broadcast Campaign #{campaign.id} '{campaign.name}' with {len(recipients)} recipients."
+            f"Created Broadcast Campaign #{campaign.id} '{campaign.name}' with {len(recipients)} recipients for tenant '{self.tenant_id}'."
         )
         return campaign
 
     async def start_campaign(self, campaign_id: int) -> dict[str, Any]:
         """Start or resume execution of a broadcast campaign."""
-        stmt = select(BroadcastCampaign).where(BroadcastCampaign.id == campaign_id)
+        stmt = select(BroadcastCampaign).where(
+            BroadcastCampaign.id == campaign_id,
+            BroadcastCampaign.tenant_id == self.tenant_id,
+        )
         res = await self.session.execute(stmt)
         campaign = res.scalar_one_or_none()
         if not campaign:
@@ -132,7 +143,10 @@ class BroadcastService:
 
     async def pause_campaign(self, campaign_id: int) -> dict[str, Any]:
         """Pause a currently running campaign."""
-        stmt = select(BroadcastCampaign).where(BroadcastCampaign.id == campaign_id)
+        stmt = select(BroadcastCampaign).where(
+            BroadcastCampaign.id == campaign_id,
+            BroadcastCampaign.tenant_id == self.tenant_id,
+        )
         res = await self.session.execute(stmt)
         campaign = res.scalar_one_or_none()
         if not campaign:
@@ -190,6 +204,8 @@ class BroadcastService:
                 continue
 
             last_active = cust.last_contact_at or cust.first_contact_at
+            if last_active and last_active.tzinfo is None:
+                last_active = last_active.replace(tzinfo=timezone.utc)
             is_outside_24h = last_active < twenty_four_hours_ago if last_active else True
 
             # 24-HOUR POLICY ENFORCEMENT
@@ -244,13 +260,17 @@ class BroadcastService:
                 # Save record in conversation message history
                 conv_stmt = (
                     select(Conversation)
-                    .where(Conversation.customer_id == cust.id)
+                    .where(
+                        Conversation.customer_id == cust.id,
+                        Conversation.tenant_id == self.tenant_id,
+                    )
                     .order_by(Conversation.id.desc())
                 )
                 conv = (await self.session.execute(conv_stmt)).scalars().first()
                 if conv:
                     self.session.add(
                         Message(
+                            tenant_id=self.tenant_id,
                             conversation_id=conv.id,
                             role=MessageRole.BOT,
                             content=campaign.message_content,

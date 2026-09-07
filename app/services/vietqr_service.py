@@ -35,11 +35,13 @@ class VietQRService:
         self.account_name = account_name
 
     @classmethod
-    async def from_settings(cls, session: AsyncSession) -> "VietQRService":
+    async def from_settings(
+        cls, session: AsyncSession, tenant_id: str = "default-system-tenant"
+    ) -> "VietQRService":
         """Construct VietQRService using dynamic settings from database."""
         from app.services.settings_service import SettingsService
 
-        settings_service = SettingsService(session)
+        settings_service = SettingsService(session, tenant_id=tenant_id)
         bank_code = (await settings_service.get_setting("vietqr_bank_code", "TCB")) or "TCB"
         account_number = (
             await settings_service.get_setting("vietqr_account_number", "19036588999018")

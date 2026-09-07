@@ -12,13 +12,17 @@ from app.models.setting import SettingCategory, SystemSetting
 class SettingsService:
     """Service for querying and persisting dynamic application configuration."""
 
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(self, session: AsyncSession, tenant_id: str = "default-system-tenant") -> None:
         self.session = session
+        self.tenant_id = tenant_id
         self._static_settings = get_settings()
 
     async def get_setting(self, key: str, default: str | None = None) -> str | None:
         """Get setting value from DB, falling back to static config (.env) if absent."""
-        stmt = select(SystemSetting).where(SystemSetting.key == key)
+        stmt = select(SystemSetting).where(
+            SystemSetting.key == key,
+            SystemSetting.tenant_id == self.tenant_id,
+        )
         result = await self.session.execute(stmt)
         setting = result.scalar_one_or_none()
 
@@ -38,7 +42,10 @@ class SettingsService:
         category: SettingCategory = SettingCategory.GENERAL,
     ) -> SystemSetting:
         """Create or update a dynamic system setting."""
-        stmt = select(SystemSetting).where(SystemSetting.key == key)
+        stmt = select(SystemSetting).where(
+            SystemSetting.key == key,
+            SystemSetting.tenant_id == self.tenant_id,
+        )
         result = await self.session.execute(stmt)
         setting = result.scalar_one_or_none()
 
@@ -50,6 +57,7 @@ class SettingsService:
             setting.category = category
         else:
             setting = SystemSetting(
+                tenant_id=self.tenant_id,
                 key=key,
                 value=value,
                 description=description,
@@ -63,7 +71,11 @@ class SettingsService:
 
     async def get_all_settings(self, mask_secrets: bool = True) -> list[dict[str, Any]]:
         """Retrieve all registered dynamic settings, optionally masking secret keys."""
-        stmt = select(SystemSetting).order_by(SystemSetting.category, SystemSetting.key)
+        stmt = (
+            select(SystemSetting)
+            .where(SystemSetting.tenant_id == self.tenant_id)
+            .order_by(SystemSetting.category, SystemSetting.key)
+        )
         result = await self.session.execute(stmt)
         settings = result.scalars().all()
 

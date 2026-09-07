@@ -10,8 +10,9 @@ from app.schemas.customer import CustomerCreate, CustomerUpdate
 class CustomerService:
     """Manages customer profiles, persistence, and tagging."""
 
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(self, session: AsyncSession, tenant_id: str = "default-system-tenant") -> None:
         self.session = session
+        self.tenant_id = tenant_id
 
     async def get_by_platform_id(
         self, platform: str | Platform, platform_user_id: str
@@ -21,6 +22,7 @@ class CustomerService:
         stmt = select(Customer).where(
             Customer.platform == plat_val,
             Customer.platform_user_id == platform_user_id,
+            Customer.tenant_id == self.tenant_id,
         )
         res = await self.session.execute(stmt)
         return res.scalar_one_or_none()
@@ -28,6 +30,7 @@ class CustomerService:
     async def create_customer(self, data: CustomerCreate) -> Customer:
         """Create a new customer profile."""
         customer = Customer(
+            tenant_id=self.tenant_id,
             platform=data.platform,
             platform_user_id=data.platform_user_id,
             name=data.name,
@@ -56,6 +59,7 @@ class CustomerService:
 
         plat_val = platform.value if isinstance(platform, Platform) else platform
         new_customer = Customer(
+            tenant_id=self.tenant_id,
             platform=plat_val,
             platform_user_id=platform_user_id,
             name=name,
@@ -68,7 +72,10 @@ class CustomerService:
 
     async def update_customer(self, customer_id: int, data: CustomerUpdate) -> Customer | None:
         """Update existing customer details."""
-        stmt = select(Customer).where(Customer.id == customer_id)
+        stmt = select(Customer).where(
+            Customer.id == customer_id,
+            Customer.tenant_id == self.tenant_id,
+        )
         res = await self.session.execute(stmt)
         customer = res.scalar_one_or_none()
         if not customer:

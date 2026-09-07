@@ -102,15 +102,19 @@ class FunnelService:
         return customer
 
     @staticmethod
-    async def get_funnel_statistics(session: AsyncSession) -> FunnelStatsResponse:
+    async def get_funnel_statistics(
+        session: AsyncSession, tenant_id: str | None = None
+    ) -> FunnelStatsResponse:
         """Compute aggregate counts and conversion rates across all funnel stages."""
         total_stmt = select(func.count(Customer.id))
+        group_stmt = select(Customer.funnel_stage, func.count(Customer.id))
+        if tenant_id is not None:
+            total_stmt = total_stmt.where(Customer.tenant_id == tenant_id)
+            group_stmt = group_stmt.where(Customer.tenant_id == tenant_id)
         total_customers = (await session.execute(total_stmt)).scalar() or 0
 
         # Query counts grouped by funnel_stage
-        group_stmt = select(Customer.funnel_stage, func.count(Customer.id)).group_by(
-            Customer.funnel_stage
-        )
+        group_stmt = group_stmt.group_by(Customer.funnel_stage)
         rows = (await session.execute(group_stmt)).all()
         counts_dict: dict[str, int] = {stage.value: 0 for stage in FunnelStage}
         for stage_val, count in rows:

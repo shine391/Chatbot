@@ -199,7 +199,8 @@ async def admin_login(
 
     settings = get_settings()
     tenant_id = getattr(user, "tenant_id", None) or "default-system-tenant"
-    token_data = {"sub": user.username, "role": user.role, "tenant_id": tenant_id}
+    is_super = getattr(user, "is_superadmin", False)
+    token_data = {"sub": user.username, "role": user.role, "tenant_id": tenant_id, "is_superadmin": is_super}
     access_token = create_access_token(token_data)
     refresh_token = create_refresh_token(token_data)
 
@@ -213,7 +214,7 @@ async def admin_login(
             "display_name": user.display_name,
             "role": user.role,
             "tenant_id": tenant_id,
-            "is_superadmin": getattr(user, "is_superadmin", False),
+            "is_superadmin": is_super,
         },
     }
 
@@ -239,7 +240,10 @@ async def refresh_access_token(
 
     settings = get_settings()
     tenant_id = getattr(user, "tenant_id", None) or "default-system-tenant"
-    new_access = create_access_token({"sub": user.username, "role": user.role, "tenant_id": tenant_id})
+    is_super = getattr(user, "is_superadmin", False)
+    new_access = create_access_token(
+        {"sub": user.username, "role": user.role, "tenant_id": tenant_id, "is_superadmin": is_super}
+    )
     return {
         "access_token": new_access,
         "token_type": "bearer",
@@ -377,7 +381,11 @@ async def list_categories(
     session: AsyncSession = Depends(get_db_session),
     _user: AdminUser = Depends(get_current_user),
 ) -> list[CategoryResponse]:
-    stmt = select(Category).order_by(Category.name)
+    tenant_id = getattr(_user, "tenant_id", None) or "default-system-tenant"
+    stmt = select(Category)
+    if not getattr(_user, "is_superadmin", False):
+        stmt = stmt.where(Category.tenant_id == tenant_id)
+    stmt = stmt.order_by(Category.name)
     res = await session.execute(stmt)
     categories = res.scalars().all()
     return [
@@ -398,12 +406,17 @@ async def create_category(
     session: AsyncSession = Depends(get_db_session),
     _user: AdminUser = Depends(require_roles("admin", "manager")),
 ) -> CategoryResponse:
-    stmt = select(Category).where(Category.slug == data.slug)
+    tenant_id = getattr(_user, "tenant_id", None) or "default-system-tenant"
+    stmt = select(Category).where(
+        Category.slug == data.slug,
+        Category.tenant_id == tenant_id,
+    )
     existing = (await session.execute(stmt)).scalar_one_or_none()
     if existing:
         raise HTTPException(status_code=400, detail="Slug already exists")
 
     cat = Category(
+        tenant_id=tenant_id,
         name=data.name,
         slug=data.slug,
         description=data.description,
@@ -427,7 +440,10 @@ async def delete_category(
     session: AsyncSession = Depends(get_db_session),
     _user: AdminUser = Depends(require_roles("admin", "manager")),
 ) -> dict[str, Any]:
+    tenant_id = getattr(_user, "tenant_id", None) or "default-system-tenant"
     stmt = select(Category).where(Category.id == category_id)
+    if not getattr(_user, "is_superadmin", False):
+        stmt = stmt.where(Category.tenant_id == tenant_id)
     cat = (await session.execute(stmt)).scalar_one_or_none()
     if not cat:
         raise HTTPException(status_code=404, detail="Category not found")
@@ -582,6 +598,7 @@ async def create_product(
                         "name": prod.name,
                         "price": prod.price,
                         "category_id": prod.category_id,
+                        "tenant_id": prod.tenant_id,
                     },
                 }
             ],
@@ -599,7 +616,10 @@ async def update_product(
     session: AsyncSession = Depends(get_db_session),
     _user: AdminUser = Depends(require_roles("admin", "manager")),
 ) -> ProductDetail:
+    tenant_id = getattr(_user, "tenant_id", None) or "default-system-tenant"
     stmt = select(Product).where(Product.id == product_id)
+    if not getattr(_user, "is_superadmin", False):
+        stmt = stmt.where(Product.tenant_id == tenant_id)
     prod = (await session.execute(stmt)).scalar_one_or_none()
     if not prod:
         raise HTTPException(status_code=404, detail="Product not found")
@@ -646,6 +666,7 @@ async def update_product(
                         "name": prod.name,
                         "price": prod.price,
                         "category_id": prod.category_id,
+                        "tenant_id": prod.tenant_id,
                     },
                 }
             ],
@@ -662,7 +683,10 @@ async def delete_product(
     session: AsyncSession = Depends(get_db_session),
     _user: AdminUser = Depends(require_roles("admin", "manager")),
 ) -> dict[str, Any]:
+    tenant_id = getattr(_user, "tenant_id", None) or "default-system-tenant"
     stmt = select(Product).where(Product.id == product_id)
+    if not getattr(_user, "is_superadmin", False):
+        stmt = stmt.where(Product.tenant_id == tenant_id)
     prod = (await session.execute(stmt)).scalar_one_or_none()
     if not prod:
         raise HTTPException(status_code=404, detail="Product not found")
@@ -682,13 +706,27 @@ async def get_dashboard_stats(
     session: AsyncSession = Depends(get_db_session),
     _user: AdminUser = Depends(get_current_user),
 ) -> dict[str, Any]:
-    total_customers = (await session.execute(select(func.count(Customer.id)))).scalar() or 0
-    total_conversations = (await session.execute(select(func.count(Conversation.id)))).scalar() or 0
-    total_products = (await session.execute(select(func.count(Product.id)))).scalar() or 0
-    total_orders = (await session.execute(select(func.count(Order.id)))).scalar() or 0
-    total_revenue = (
-        await session.execute(select(func.coalesce(func.sum(Order.total_amount), 0.0)))
-    ).scalar() or 0.0
+    tenant_id = getattr(_user, "tenant_id", None) or "default-system-tenant"
+    is_super = getattr(_user, "is_superadmin", False)
+
+    cust_stmt = select(func.count(Customer.id))
+    conv_stmt = select(func.count(Conversation.id))
+    prod_stmt = select(func.count(Product.id))
+    ord_stmt = select(func.count(Order.id))
+    rev_stmt = select(func.coalesce(func.sum(Order.total_amount), 0.0))
+
+    if not is_super:
+        cust_stmt = cust_stmt.where(Customer.tenant_id == tenant_id)
+        conv_stmt = conv_stmt.where(Conversation.tenant_id == tenant_id)
+        prod_stmt = prod_stmt.where(Product.tenant_id == tenant_id)
+        ord_stmt = ord_stmt.where(Order.tenant_id == tenant_id)
+        rev_stmt = rev_stmt.where(Order.tenant_id == tenant_id)
+
+    total_customers = (await session.execute(cust_stmt)).scalar() or 0
+    total_conversations = (await session.execute(conv_stmt)).scalar() or 0
+    total_products = (await session.execute(prod_stmt)).scalar() or 0
+    total_orders = (await session.execute(ord_stmt)).scalar() or 0
+    total_revenue = (await session.execute(rev_stmt)).scalar() or 0.0
 
     return {
         "total_customers": total_customers,
@@ -705,32 +743,47 @@ async def get_dashboard_analytics(
     session: AsyncSession = Depends(get_db_session),
     _user: AdminUser = Depends(require_roles("admin", "manager")),
 ) -> dict[str, Any]:
+    tenant_id = getattr(_user, "tenant_id", None) or "default-system-tenant"
+    is_super = getattr(_user, "is_superadmin", False)
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
 
     # 1. Total summary stats
-    total_customers = (await session.execute(select(func.count(Customer.id)))).scalar() or 0
-    total_conversations = (await session.execute(select(func.count(Conversation.id)))).scalar() or 0
-    total_products = (await session.execute(select(func.count(Product.id)))).scalar() or 0
-    total_orders = (await session.execute(select(func.count(Order.id)))).scalar() or 0
-    total_revenue = (
-        await session.execute(select(func.coalesce(func.sum(Order.total_amount), 0.0)))
-    ).scalar() or 0.0
+    cust_stmt = select(func.count(Customer.id))
+    conv_stmt = select(func.count(Conversation.id))
+    prod_stmt = select(func.count(Product.id))
+    ord_stmt = select(func.count(Order.id))
+    rev_stmt = select(func.coalesce(func.sum(Order.total_amount), 0.0))
+
+    if not is_super:
+        cust_stmt = cust_stmt.where(Customer.tenant_id == tenant_id)
+        conv_stmt = conv_stmt.where(Conversation.tenant_id == tenant_id)
+        prod_stmt = prod_stmt.where(Product.tenant_id == tenant_id)
+        ord_stmt = ord_stmt.where(Order.tenant_id == tenant_id)
+        rev_stmt = rev_stmt.where(Order.tenant_id == tenant_id)
+
+    total_customers = (await session.execute(cust_stmt)).scalar() or 0
+    total_conversations = (await session.execute(conv_stmt)).scalar() or 0
+    total_products = (await session.execute(prod_stmt)).scalar() or 0
+    total_orders = (await session.execute(ord_stmt)).scalar() or 0
+    total_revenue = (await session.execute(rev_stmt)).scalar() or 0.0
 
     # 2. Paying customers (customers with at least 1 order)
-    paying_customers = (
-        await session.execute(select(func.count(func.distinct(Order.customer_id))))
-    ).scalar() or 0
+    paying_stmt = select(func.count(func.distinct(Order.customer_id)))
+    if not is_super:
+        paying_stmt = paying_stmt.where(Order.tenant_id == tenant_id)
+    paying_customers = (await session.execute(paying_stmt)).scalar() or 0
 
     conversion_rate = (
         round((paying_customers / total_customers) * 100, 2) if total_customers > 0 else 0.0
     )
 
     # 3. Channel distribution
-    channel_counts_raw = (
-        await session.execute(
-            select(Customer.platform, func.count(Customer.id)).group_by(Customer.platform)
-        )
-    ).all()
+    chan_stmt = select(Customer.platform, func.count(Customer.id))
+    if not is_super:
+        chan_stmt = chan_stmt.where(Customer.tenant_id == tenant_id)
+    chan_stmt = chan_stmt.group_by(Customer.platform)
+    channel_counts_raw = (await session.execute(chan_stmt)).all()
+
     channel_distribution: dict[str, int] = {
         "facebook": 0,
         "instagram": 0,
@@ -742,11 +795,12 @@ async def get_dashboard_analytics(
         channel_distribution[plat_key] = int(count)
 
     # 4. Funnel breakdown
-    funnel_counts_raw = (
-        await session.execute(
-            select(Customer.funnel_stage, func.count(Customer.id)).group_by(Customer.funnel_stage)
-        )
-    ).all()
+    funnel_stmt = select(Customer.funnel_stage, func.count(Customer.id))
+    if not is_super:
+        funnel_stmt = funnel_stmt.where(Customer.tenant_id == tenant_id)
+    funnel_stmt = funnel_stmt.group_by(Customer.funnel_stage)
+    funnel_counts_raw = (await session.execute(funnel_stmt)).all()
+
     funnel_breakdown: dict[str, int] = {
         "lead": 0,
         "interested": 0,
@@ -760,9 +814,12 @@ async def get_dashboard_analytics(
             funnel_breakdown[str(stg).lower()] = int(count)
 
     # 5. Order status distribution
-    status_counts_raw = (
-        await session.execute(select(Order.status, func.count(Order.id)).group_by(Order.status))
-    ).all()
+    order_status_stmt = select(Order.status, func.count(Order.id))
+    if not is_super:
+        order_status_stmt = order_status_stmt.where(Order.tenant_id == tenant_id)
+    order_status_stmt = order_status_stmt.group_by(Order.status)
+    status_counts_raw = (await session.execute(order_status_stmt)).all()
+
     order_status_distribution: dict[str, int] = {}
     for st, count in status_counts_raw:
         st_key = st.value if hasattr(st, "value") else str(st).lower()
@@ -777,6 +834,8 @@ async def get_dashboard_analytics(
 
     # Query daily orders & revenue within timeframe
     orders_query = select(Order.ordered_at, Order.total_amount).where(Order.ordered_at >= cutoff)
+    if not is_super:
+        orders_query = orders_query.where(Order.tenant_id == tenant_id)
     recent_orders = (await session.execute(orders_query)).all()
     for o_date, amount in recent_orders:
         if o_date:
@@ -787,6 +846,8 @@ async def get_dashboard_analytics(
 
     # Query daily messages within timeframe
     messages_query = select(Message.sent_at).where(Message.sent_at >= cutoff)
+    if not is_super:
+        messages_query = messages_query.where(Message.tenant_id == tenant_id)
     recent_messages = (await session.execute(messages_query)).scalars().all()
     for m_date in recent_messages:
         if m_date:
@@ -864,7 +925,8 @@ async def get_current_persona(
     _user: AdminUser = Depends(get_current_user),
 ) -> dict[str, Any]:
     """Get the active persona, preset, and greeting message from database."""
-    settings_service = SettingsService(session)
+    tenant_id = getattr(_user, "tenant_id", None) or "default-system-tenant"
+    settings_service = SettingsService(session, tenant_id=tenant_id)
     persona = await settings_service.get_setting("bot_persona") or DEFAULT_COMMERCE_PERSONA
     preset = await settings_service.get_setting("bot_preset") or "general"
     greeting = (
@@ -885,7 +947,8 @@ async def save_persona(
     _user: AdminUser = Depends(get_current_user),
 ) -> dict[str, Any]:
     """Save persona and greeting settings with hot-reload."""
-    settings_service = SettingsService(session)
+    tenant_id = getattr(_user, "tenant_id", None) or "default-system-tenant"
+    settings_service = SettingsService(session, tenant_id=tenant_id)
     await settings_service.set_setting(
         key="bot_persona",
         value=data.persona,
@@ -918,7 +981,8 @@ async def test_persona_playground(
     start_time = time.perf_counter()
     system_prompt = data.persona or DEFAULT_COMMERCE_PERSONA
 
-    settings_service = SettingsService(session)
+    tenant_id = getattr(_user, "tenant_id", None) or "default-system-tenant"
+    settings_service = SettingsService(session, tenant_id=tenant_id)
     static = get_settings()
 
     gemini_key = await settings_service.get_setting("gemini_api_key") or static.gemini_api_key
@@ -981,7 +1045,11 @@ async def list_knowledge_items(
     session: AsyncSession = Depends(get_db_session),
     _user: AdminUser = Depends(get_current_user),
 ) -> list[dict[str, Any]]:
-    stmt = select(KnowledgeItem).order_by(KnowledgeItem.id.desc())
+    tenant_id = getattr(_user, "tenant_id", None) or "default-system-tenant"
+    stmt = select(KnowledgeItem)
+    if not getattr(_user, "is_superadmin", False):
+        stmt = stmt.where(KnowledgeItem.tenant_id == tenant_id)
+    stmt = stmt.order_by(KnowledgeItem.id.desc())
     res = await session.execute(stmt)
     items = res.scalars().all()
     return [
@@ -1003,7 +1071,9 @@ async def create_knowledge_item(
     session: AsyncSession = Depends(get_db_session),
     _user: AdminUser = Depends(get_current_user),
 ) -> dict[str, Any]:
+    tenant_id = getattr(_user, "tenant_id", None) or "default-system-tenant"
     item = KnowledgeItem(
+        tenant_id=tenant_id,
         category=data.category,
         question=data.question,
         answer=data.answer,
@@ -1028,7 +1098,10 @@ async def update_knowledge_item(
     session: AsyncSession = Depends(get_db_session),
     _user: AdminUser = Depends(get_current_user),
 ) -> dict[str, Any]:
+    tenant_id = getattr(_user, "tenant_id", None) or "default-system-tenant"
     stmt = select(KnowledgeItem).where(KnowledgeItem.id == item_id)
+    if not getattr(_user, "is_superadmin", False):
+        stmt = stmt.where(KnowledgeItem.tenant_id == tenant_id)
     item = (await session.execute(stmt)).scalar_one_or_none()
     if not item:
         raise HTTPException(status_code=404, detail="Knowledge item not found")
@@ -1059,7 +1132,10 @@ async def delete_knowledge_item(
     session: AsyncSession = Depends(get_db_session),
     _user: AdminUser = Depends(get_current_user),
 ) -> dict[str, Any]:
+    tenant_id = getattr(_user, "tenant_id", None) or "default-system-tenant"
     stmt = select(KnowledgeItem).where(KnowledgeItem.id == item_id)
+    if not getattr(_user, "is_superadmin", False):
+        stmt = stmt.where(KnowledgeItem.tenant_id == tenant_id)
     item = (await session.execute(stmt)).scalar_one_or_none()
     if not item:
         raise HTTPException(status_code=404, detail="Knowledge item not found")
@@ -1075,11 +1151,14 @@ async def reindex_knowledge_to_qdrant(
     _user: AdminUser = Depends(get_current_user),
 ) -> dict[str, Any]:
     """Re-embed and index all active knowledge items into Qdrant."""
+    tenant_id = getattr(_user, "tenant_id", None) or "default-system-tenant"
     stmt = select(KnowledgeItem).where(KnowledgeItem.is_active.is_(True))
+    if not getattr(_user, "is_superadmin", False):
+        stmt = stmt.where(KnowledgeItem.tenant_id == tenant_id)
     res = await session.execute(stmt)
     items = res.scalars().all()
 
-    qdrant = QdrantVectorService(location=":memory:")
+    qdrant = QdrantVectorService()
     qdrant.ensure_collection("ecommerce_faq", vector_size=768)
 
     points: list[dict[str, Any]] = []
@@ -1094,6 +1173,7 @@ async def reindex_knowledge_to_qdrant(
                     "category": it.category,
                     "question": it.question,
                     "answer": it.answer,
+                    "tenant_id": it.tenant_id,
                 },
             }
         )
@@ -1114,7 +1194,8 @@ async def list_admin_settings(
     session: AsyncSession = Depends(get_db_session),
     _user: AdminUser = Depends(require_roles("admin")),
 ) -> dict[str, Any]:
-    settings_service = SettingsService(session)
+    tenant_id = getattr(_user, "tenant_id", None) or "default-system-tenant"
+    settings_service = SettingsService(session, tenant_id=tenant_id)
     settings_list = await settings_service.get_all_settings(mask_secrets=True)
     return {"settings": settings_list}
 
@@ -1128,7 +1209,8 @@ async def update_admin_setting(
     if data.is_secret and ("****" in data.value or data.value == "****"):
         return {"success": True, "key": data.key, "note": "Unchanged masked secret"}
 
-    settings_service = SettingsService(session)
+    tenant_id = getattr(_user, "tenant_id", None) or "default-system-tenant"
+    settings_service = SettingsService(session, tenant_id=tenant_id)
     cat_lower = str(data.category).strip().lower()
     category = (
         SettingCategory(cat_lower)
@@ -1153,9 +1235,10 @@ async def test_facebook_connection(
     _user: AdminUser = Depends(get_current_user),
 ) -> dict[str, Any]:
     """Verify Facebook Page Access Token via Meta Graph API."""
+    tenant_id = getattr(_user, "tenant_id", None) or "default-system-tenant"
     token = data.access_token if data else None
     if not token or token.startswith("***") or "****" in token:
-        settings_service = SettingsService(session)
+        settings_service = SettingsService(session, tenant_id=tenant_id)
         token = await settings_service.get_setting("facebook_page_access_token")
         if not token or token.startswith("***") or "****" in token:
             token = get_settings().facebook_page_access_token
@@ -1178,7 +1261,7 @@ async def test_facebook_connection(
                 page_id = data_json.get("id")
                 page_name = data_json.get("name")
                 # Auto update facebook_page_id and facebook_page_name in settings if connected
-                settings_service = SettingsService(session)
+                settings_service = SettingsService(session, tenant_id=tenant_id)
                 if page_id:
                     await settings_service.set_setting(
                         key="facebook_page_id",
@@ -1222,7 +1305,9 @@ async def sync_facebook_conversations(
             "progress": FacebookSyncService.get_status(),
         }
 
-    settings_service = SettingsService(session)
+    settings_service = SettingsService(
+        session, tenant_id=getattr(_user, "tenant_id", None) or "default-system-tenant"
+    )
     token = (
         data.access_token
         if (
@@ -1291,9 +1376,10 @@ async def sync_facebook_conversations(
 
     FacebookSyncService.set_running(max_convs)
 
+    tenant_id = getattr(_user, "tenant_id", None) or "default-system-tenant"
     bind_engine = session.bind
 
-    async def _run_bg_sync(pid: str, tok: str, max_c: int) -> None:
+    async def _run_bg_sync(pid: str, tok: str, max_c: int, t_id: str) -> None:
         from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
         if isinstance(bind_engine, AsyncEngine):
@@ -1307,13 +1393,14 @@ async def sync_facebook_conversations(
                     page_id=pid,
                     access_token=tok,
                     max_conversations=max_c,
+                    tenant_id=t_id,
                 )
         except Exception as e:
             logger.exception("Background Facebook sync error: %s", e)
             FacebookSyncService._state["status"] = "error"
             FacebookSyncService._state["error_message"] = str(e)
 
-    background_tasks.add_task(_run_bg_sync, page_id, token, max_convs)
+    background_tasks.add_task(_run_bg_sync, page_id, token, max_convs, tenant_id)
 
     return {
         "status": "started",
@@ -1341,7 +1428,8 @@ async def test_llm_connection(
 
     # If key is omitted or masked, pull real key from DB or static settings
     if not api_key or "****" in api_key:
-        settings_service = SettingsService(session)
+        tenant_id = getattr(_user, "tenant_id", None) or "default-system-tenant"
+        settings_service = SettingsService(session, tenant_id=tenant_id)
         key_name = f"{provider}_api_key" if provider != "claude" else "anthropic_api_key"
         api_key = await settings_service.get_setting(key_name)
         if not api_key or "****" in api_key:
@@ -1462,12 +1550,15 @@ async def list_conversations(
     _user: AdminUser = Depends(get_current_user),
 ) -> list[dict[str, Any]]:
     """List recent conversations with latest customer info and bot status."""
+    tenant_id = getattr(_user, "tenant_id", None) or "default-system-tenant"
     stmt = (
         select(Conversation, Customer)
         .outerjoin(Customer, Conversation.customer_id == Customer.id)
-        .order_by(Conversation.id.desc())
-        .limit(50)
     )
+    if not getattr(_user, "is_superadmin", False):
+        stmt = stmt.where(Conversation.tenant_id == tenant_id)
+    stmt = stmt.order_by(Conversation.id.desc()).limit(50)
+
     res = await session.execute(stmt)
     rows = res.all()
     if not rows:
@@ -1517,6 +1608,14 @@ async def get_conversation_messages(
     _user: AdminUser = Depends(get_current_user),
 ) -> list[dict[str, Any]]:
     """Get all messages for a specific conversation."""
+    tenant_id = getattr(_user, "tenant_id", None) or "default-system-tenant"
+    conv_stmt = select(Conversation).where(Conversation.id == conversation_id)
+    if not getattr(_user, "is_superadmin", False):
+        conv_stmt = conv_stmt.where(Conversation.tenant_id == tenant_id)
+    conv = (await session.execute(conv_stmt)).scalar_one_or_none()
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
     stmt = (
         select(Message)
         .where(Message.conversation_id == conversation_id)
@@ -1546,7 +1645,10 @@ async def takeover_conversation(
     _user: AdminUser = Depends(get_current_user),
 ) -> dict[str, Any]:
     """Take over conversation: silence bot so human agent can handle chat directly."""
+    tenant_id = getattr(_user, "tenant_id", None) or "default-system-tenant"
     stmt = select(Conversation).where(Conversation.id == conversation_id)
+    if not getattr(_user, "is_superadmin", False):
+        stmt = stmt.where(Conversation.tenant_id == tenant_id)
     conv = (await session.execute(stmt)).scalar_one_or_none()
     if not conv:
         raise HTTPException(status_code=404, detail="Conversation not found")
@@ -1557,6 +1659,7 @@ async def takeover_conversation(
     await live_chat_manager.broadcast(
         event_type="bot_status_changed",
         data={"conversation_id": conversation_id, "is_bot_active": False},
+        tenant_id=tenant_id,
     )
     return {"success": True, "conversation_id": conversation_id, "is_bot_active": False}
 
@@ -1568,7 +1671,10 @@ async def handover_conversation(
     _user: AdminUser = Depends(get_current_user),
 ) -> dict[str, Any]:
     """Hand over conversation back to automated AI bot."""
+    tenant_id = getattr(_user, "tenant_id", None) or "default-system-tenant"
     stmt = select(Conversation).where(Conversation.id == conversation_id)
+    if not getattr(_user, "is_superadmin", False):
+        stmt = stmt.where(Conversation.tenant_id == tenant_id)
     conv = (await session.execute(stmt)).scalar_one_or_none()
     if not conv:
         raise HTTPException(status_code=404, detail="Conversation not found")
@@ -1579,6 +1685,7 @@ async def handover_conversation(
     await live_chat_manager.broadcast(
         event_type="bot_status_changed",
         data={"conversation_id": conversation_id, "is_bot_active": True},
+        tenant_id=tenant_id,
     )
     return {"success": True, "conversation_id": conversation_id, "is_bot_active": True}
 
@@ -1591,7 +1698,10 @@ async def send_agent_message(
     _user: AdminUser = Depends(get_current_user),
 ) -> dict[str, Any]:
     """Send message from staff/agent directly to customer."""
+    tenant_id = getattr(_user, "tenant_id", None) or "default-system-tenant"
     stmt = select(Conversation).where(Conversation.id == conversation_id)
+    if not getattr(_user, "is_superadmin", False):
+        stmt = stmt.where(Conversation.tenant_id == tenant_id)
     conv = (await session.execute(stmt)).scalar_one_or_none()
     if not conv:
         raise HTTPException(status_code=404, detail="Conversation not found")
@@ -1603,6 +1713,7 @@ async def send_agent_message(
 
     # Log agent message to database
     agent_msg = Message(
+        tenant_id=tenant_id,
         conversation_id=conversation_id,
         role=MessageRole.AGENT,
         content=data.content,
@@ -1637,6 +1748,7 @@ async def send_agent_message(
             "content": data.content,
             "sent_at": agent_msg.sent_at.isoformat() if agent_msg.sent_at else None,
         },
+        tenant_id=tenant_id,
     )
 
     return {"success": True, "message_id": agent_msg.id, "content": data.content}
@@ -1649,7 +1761,10 @@ async def inspect_conversation(
     _user: AdminUser = Depends(get_current_user),
 ) -> dict[str, Any]:
     """AI Inspector: X-Ray view into prompts, context, and guardrail intervention logs."""
+    tenant_id = getattr(_user, "tenant_id", None) or "default-system-tenant"
     stmt = select(Conversation).where(Conversation.id == conversation_id)
+    if not getattr(_user, "is_superadmin", False):
+        stmt = stmt.where(Conversation.tenant_id == tenant_id)
     conv = (await session.execute(stmt)).scalar_one_or_none()
     if not conv:
         raise HTTPException(status_code=404, detail="Conversation not found")
@@ -1684,7 +1799,7 @@ async def inspect_conversation(
         .all()
     )
 
-    settings_service = SettingsService(session)
+    settings_service = SettingsService(session, tenant_id=tenant_id)
     active_persona = await settings_service.get_setting("bot_persona") or DEFAULT_COMMERCE_PERSONA
     active_preset = await settings_service.get_setting("bot_preset") or "general"
 
@@ -1905,7 +2020,8 @@ async def create_customer(
     _user: AdminUser = Depends(get_current_user),
 ) -> CustomerDetail:
     """Manually create a new customer record."""
-    service = CustomerService(session)
+    tenant_id = getattr(_user, "tenant_id", None) or "default-system-tenant"
+    service = CustomerService(session, tenant_id=tenant_id)
     existing = await service.get_by_platform_id(data.platform, data.platform_user_id)
     if existing:
         raise HTTPException(
@@ -1945,7 +2061,11 @@ async def get_funnel_stats(
     session: AsyncSession = Depends(get_db_session),
     _user: AdminUser = Depends(get_current_user),
 ) -> FunnelStatsResponse:
-    return await FunnelService.get_funnel_statistics(session)
+    tenant_id = getattr(_user, "tenant_id", None) or "default-system-tenant"
+    is_superadmin = getattr(_user, "is_superadmin", False)
+    return await FunnelService.get_funnel_statistics(
+        session, tenant_id=tenant_id if not is_superadmin else None
+    )
 
 
 @router.get("/customers/{customer_id}")
@@ -1954,24 +2074,32 @@ async def get_customer_detail(
     session: AsyncSession = Depends(get_db_session),
     _user: AdminUser = Depends(get_current_user),
 ) -> dict[str, Any]:
+    tenant_id = getattr(_user, "tenant_id", None) or "default-system-tenant"
     stmt = select(Customer).where(Customer.id == customer_id)
+    if not getattr(_user, "is_superadmin", False):
+        stmt = stmt.where(Customer.tenant_id == tenant_id)
     cust = (await session.execute(stmt)).scalar_one_or_none()
     if not cust:
         raise HTTPException(status_code=404, detail="Customer not found")
 
     ord_stmt = (
-        select(Order).where(Order.customer_id == customer_id).order_by(Order.ordered_at.desc())
+        select(Order).where(Order.customer_id == customer_id)
     )
+    if not getattr(_user, "is_superadmin", False):
+        ord_stmt = ord_stmt.where(Order.tenant_id == tenant_id)
+    ord_stmt = ord_stmt.order_by(Order.ordered_at.desc())
     orders = (await session.execute(ord_stmt)).scalars().all()
 
     conv_stmt = (
         select(Conversation)
         .where(Conversation.customer_id == customer_id)
-        .order_by(Conversation.started_at.desc())
     )
+    if not getattr(_user, "is_superadmin", False):
+        conv_stmt = conv_stmt.where(Conversation.tenant_id == tenant_id)
+    conv_stmt = conv_stmt.order_by(Conversation.started_at.desc())
     convs = (await session.execute(conv_stmt)).scalars().all()
 
-    vietqr = await VietQRService.from_settings(session)
+    vietqr = await VietQRService.from_settings(session, tenant_id=tenant_id)
     return {
         "customer": CustomerDetail(
             id=cust.id,
@@ -2021,7 +2149,10 @@ async def update_customer(
     session: AsyncSession = Depends(get_db_session),
     _user: AdminUser = Depends(get_current_user),
 ) -> CustomerDetail:
+    tenant_id = getattr(_user, "tenant_id", None) or "default-system-tenant"
     stmt = select(Customer).where(Customer.id == customer_id)
+    if not getattr(_user, "is_superadmin", False):
+        stmt = stmt.where(Customer.tenant_id == tenant_id)
     cust = (await session.execute(stmt)).scalar_one_or_none()
     if not cust:
         raise HTTPException(status_code=404, detail="Customer not found")
@@ -2134,7 +2265,7 @@ async def list_orders(
     stmt = stmt.order_by(order_clause).offset(offset).limit(limit)
 
     rows = (await session.execute(stmt)).all()
-    vietqr = await VietQRService.from_settings(session)
+    vietqr = await VietQRService.from_settings(session, tenant_id=tenant_id)
 
     results: list[OrderDetail] = []
     for order, c_name, c_phone in rows:
@@ -2181,7 +2312,7 @@ async def export_orders_csv(
         stmt = stmt.where(Order.tenant_id == tenant_id)
     stmt = stmt.order_by(Order.ordered_at.desc())
     rows = (await session.execute(stmt)).all()
-    vietqr = await VietQRService.from_settings(session)
+    vietqr = await VietQRService.from_settings(session, tenant_id=tenant_id)
 
     output = io.StringIO()
     writer = csv.writer(output, dialect="excel")
@@ -2244,7 +2375,10 @@ async def create_order(
     session: AsyncSession = Depends(get_db_session),
     _user: AdminUser = Depends(get_current_user),
 ) -> OrderDetail:
+    tenant_id = getattr(_user, "tenant_id", None) or "default-system-tenant"
     stmt_cust = select(Customer).where(Customer.id == data.customer_id)
+    if not getattr(_user, "is_superadmin", False):
+        stmt_cust = stmt_cust.where(Customer.tenant_id == tenant_id)
     cust = (await session.execute(stmt_cust)).scalar_one_or_none()
     if not cust:
         raise HTTPException(status_code=404, detail="Customer not found")
@@ -2254,6 +2388,7 @@ async def create_order(
         total = sum(item.price * item.quantity for item in data.items)
 
     order = Order(
+        tenant_id=tenant_id,
         customer_id=data.customer_id,
         status=OrderStatus.PENDING,
         total_amount=float(total),
@@ -2267,7 +2402,7 @@ async def create_order(
     # Auto-promote customer funnel stage
     await FunnelService.check_and_promote_after_order(session, data.customer_id)
 
-    vietqr = await VietQRService.from_settings(session)
+    vietqr = await VietQRService.from_settings(session, tenant_id=tenant_id)
     qr_url = vietqr.generate_qr_url(amount=order.total_amount, memo=f"DH{order.id}")
     st = order.status if isinstance(order.status, OrderStatus) else OrderStatus(order.status)
 
@@ -2294,11 +2429,14 @@ async def update_order_status(
     session: AsyncSession = Depends(get_db_session),
     _user: AdminUser = Depends(get_current_user),
 ) -> OrderDetail:
+    tenant_id = getattr(_user, "tenant_id", None) or "default-system-tenant"
     stmt = (
         select(Order, Customer.name, Customer.phone)
         .join(Customer, Order.customer_id == Customer.id)
         .where(Order.id == order_id)
     )
+    if not getattr(_user, "is_superadmin", False):
+        stmt = stmt.where(Order.tenant_id == tenant_id)
     row = (await session.execute(stmt)).first()
     if not row:
         raise HTTPException(status_code=404, detail="Order not found")
@@ -2313,7 +2451,7 @@ async def update_order_status(
     await session.commit()
     await session.refresh(order)
 
-    vietqr = await VietQRService.from_settings(session)
+    vietqr = await VietQRService.from_settings(session, tenant_id=tenant_id)
     qr_url = vietqr.generate_qr_url(amount=order.total_amount, memo=f"DH{order.id}")
     st = order.status if isinstance(order.status, OrderStatus) else OrderStatus(order.status)
 
@@ -2339,12 +2477,15 @@ async def get_order_vietqr(
     session: AsyncSession = Depends(get_db_session),
     _user: AdminUser = Depends(get_current_user),
 ) -> dict[str, Any]:
+    tenant_id = getattr(_user, "tenant_id", None) or "default-system-tenant"
     stmt = select(Order).where(Order.id == order_id)
+    if not getattr(_user, "is_superadmin", False):
+        stmt = stmt.where(Order.tenant_id == tenant_id)
     order = (await session.execute(stmt)).scalar_one_or_none()
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
 
-    vietqr = await VietQRService.from_settings(session)
+    vietqr = await VietQRService.from_settings(session, tenant_id=tenant_id)
     return vietqr.generate_order_payment(order_id=order.id, amount=order.total_amount)
 
 
@@ -2370,16 +2511,18 @@ async def livechat_websocket(
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
 
-    await live_chat_manager.connect(websocket)
+    tenant_id = payload.get("tenant_id") or "default-system-tenant"
+    is_superadmin = bool(payload.get("is_superadmin", False))
+    await live_chat_manager.connect(websocket, tenant_id=tenant_id, is_superadmin=is_superadmin)
     try:
         while True:
             data = await websocket.receive_text()
             if data == "ping":
                 await websocket.send_text("pong")
     except WebSocketDisconnect:
-        live_chat_manager.disconnect(websocket)
+        live_chat_manager.disconnect(websocket, tenant_id=tenant_id)
     except Exception:
-        live_chat_manager.disconnect(websocket)
+        live_chat_manager.disconnect(websocket, tenant_id=tenant_id)
 
 
 # ===========================================================================
@@ -2456,21 +2599,21 @@ async def update_quick_reply(
     _user: AdminUser = Depends(get_current_user),
 ) -> QuickReplyDetail:
     """Update an existing quick reply template."""
-    qr = (
-        await session.execute(select(QuickReply).where(QuickReply.id == reply_id))
-    ).scalar_one_or_none()
+    tenant_id = getattr(_user, "tenant_id", None) or "default-system-tenant"
+    stmt = select(QuickReply).where(QuickReply.id == reply_id)
+    if not getattr(_user, "is_superadmin", False):
+        stmt = stmt.where(QuickReply.tenant_id == tenant_id)
+    qr = (await session.execute(stmt)).scalar_one_or_none()
     if not qr:
         raise HTTPException(status_code=404, detail="Quick reply not found")
 
     if data.shortcut is not None and data.shortcut.strip() != qr.shortcut:
-        dup = (
-            await session.execute(
-                select(QuickReply).where(
-                    QuickReply.shortcut == data.shortcut.strip(),
-                    QuickReply.id != reply_id,
-                )
-            )
-        ).scalar_one_or_none()
+        dup_stmt = select(QuickReply).where(
+            QuickReply.shortcut == data.shortcut.strip(),
+            QuickReply.id != reply_id,
+            QuickReply.tenant_id == tenant_id,
+        )
+        dup = (await session.execute(dup_stmt)).scalar_one_or_none()
         if dup:
             raise HTTPException(
                 status_code=400,
@@ -2497,9 +2640,11 @@ async def delete_quick_reply(
     _user: AdminUser = Depends(get_current_user),
 ) -> dict[str, Any]:
     """Delete a quick reply template."""
-    qr = (
-        await session.execute(select(QuickReply).where(QuickReply.id == reply_id))
-    ).scalar_one_or_none()
+    tenant_id = getattr(_user, "tenant_id", None) or "default-system-tenant"
+    stmt = select(QuickReply).where(QuickReply.id == reply_id)
+    if not getattr(_user, "is_superadmin", False):
+        stmt = stmt.where(QuickReply.tenant_id == tenant_id)
+    qr = (await session.execute(stmt)).scalar_one_or_none()
     if not qr:
         raise HTTPException(status_code=404, detail="Quick reply not found")
 
@@ -2521,22 +2666,31 @@ async def list_notifications(
     _user: AdminUser = Depends(get_current_user),
 ) -> list[dict[str, Any]]:
     """Retrieve recent notifications synthesized from database events."""
+    tenant_id = getattr(_user, "tenant_id", None) or "default-system-tenant"
+    is_superadmin = getattr(_user, "is_superadmin", False)
+
+    orders_stmt = (
+        select(Order, Customer.name)
+        .join(Customer, Order.customer_id == Customer.id)
+    )
+    if not is_superadmin:
+        orders_stmt = orders_stmt.where(Order.tenant_id == tenant_id)
     recent_orders = (
         await session.execute(
-            select(Order, Customer.name)
-            .join(Customer, Order.customer_id == Customer.id)
-            .order_by(Order.ordered_at.desc())
-            .limit(5)
+            orders_stmt.order_by(Order.ordered_at.desc()).limit(5)
         )
     ).all()
 
+    esc_stmt = (
+        select(Conversation, Customer.name)
+        .join(Customer, Conversation.customer_id == Customer.id)
+        .where(Conversation.is_bot_active.is_(False))
+    )
+    if not is_superadmin:
+        esc_stmt = esc_stmt.where(Conversation.tenant_id == tenant_id)
     escalations = (
         await session.execute(
-            select(Conversation, Customer.name)
-            .join(Customer, Conversation.customer_id == Customer.id)
-            .where(Conversation.is_bot_active.is_(False))
-            .order_by(Conversation.started_at.desc())
-            .limit(5)
+            esc_stmt.order_by(Conversation.started_at.desc()).limit(5)
         )
     ).all()
 
@@ -2650,7 +2804,11 @@ async def list_staff_members(
     _user: AdminUser = Depends(require_roles("admin")),
 ) -> list[StaffDetail]:
     """List all staff accounts with their RBAC roles (Admin only)."""
-    stmt = select(AdminUser).order_by(AdminUser.id.asc())
+    tenant_id = getattr(_user, "tenant_id", None) or "default-system-tenant"
+    stmt = select(AdminUser)
+    if not getattr(_user, "is_superadmin", False):
+        stmt = stmt.where(AdminUser.tenant_id == tenant_id)
+    stmt = stmt.order_by(AdminUser.id.asc())
     users = (await session.execute(stmt)).scalars().all()
     return [StaffDetail.model_validate(u) for u in users]
 
@@ -2662,6 +2820,7 @@ async def create_staff_member(
     current_user: AdminUser = Depends(require_roles("admin")),
 ) -> StaffDetail:
     """Create a new staff user with designated role (Admin only)."""
+    tenant_id = getattr(current_user, "tenant_id", None) or "default-system-tenant"
     stmt = select(AdminUser).where(AdminUser.username == data.username)
     if (await session.execute(stmt)).scalar_one_or_none():
         raise HTTPException(
@@ -2676,6 +2835,7 @@ async def create_staff_member(
         role=data.role,
         email=data.email,
         phone=data.phone,
+        tenant_id=tenant_id,
         is_active=True,
         created_by_id=current_user.id,
     )
@@ -2693,7 +2853,10 @@ async def update_staff_member(
     _user: AdminUser = Depends(require_roles("admin")),
 ) -> StaffDetail:
     """Update staff details, status, or role (Admin only)."""
+    tenant_id = getattr(_user, "tenant_id", None) or "default-system-tenant"
     stmt = select(AdminUser).where(AdminUser.id == user_id)
+    if not getattr(_user, "is_superadmin", False):
+        stmt = stmt.where(AdminUser.tenant_id == tenant_id)
     target = (await session.execute(stmt)).scalar_one_or_none()
     if not target:
         raise HTTPException(status_code=404, detail="Nhân viên không tồn tại.")
@@ -2729,7 +2892,10 @@ async def delete_staff_member(
             detail="Không thể tự xóa tài khoản của chính mình.",
         )
 
+    tenant_id = getattr(current_user, "tenant_id", None) or "default-system-tenant"
     stmt = select(AdminUser).where(AdminUser.id == user_id)
+    if not getattr(current_user, "is_superadmin", False):
+        stmt = stmt.where(AdminUser.tenant_id == tenant_id)
     target = (await session.execute(stmt)).scalar_one_or_none()
     if not target:
         raise HTTPException(status_code=404, detail="Nhân viên không tồn tại.")
@@ -2756,7 +2922,11 @@ async def list_broadcast_campaigns(
     _user: AdminUser = Depends(require_roles("admin", "manager")),
 ) -> list[BroadcastCampaignDetail]:
     """List all broadcast campaigns (Admin & Manager)."""
-    stmt = select(BroadcastCampaign).order_by(BroadcastCampaign.id.desc())
+    tenant_id = getattr(_user, "tenant_id", None) or "default-system-tenant"
+    stmt = select(BroadcastCampaign)
+    if not getattr(_user, "is_superadmin", False):
+        stmt = stmt.where(BroadcastCampaign.tenant_id == tenant_id)
+    stmt = stmt.order_by(BroadcastCampaign.id.desc())
     campaigns = (await session.execute(stmt)).scalars().all()
     return [BroadcastCampaignDetail.model_validate(c) for c in campaigns]
 
@@ -2768,7 +2938,8 @@ async def create_broadcast_campaign(
     _user: AdminUser = Depends(require_roles("admin", "manager")),
 ) -> BroadcastCampaignDetail:
     """Create a new broadcast campaign and populate eligible recipients."""
-    service = BroadcastService(session)
+    tenant_id = getattr(_user, "tenant_id", None) or "default-system-tenant"
+    service = BroadcastService(session, tenant_id=tenant_id)
     campaign = await service.create_campaign(data)
     return BroadcastCampaignDetail.model_validate(campaign)
 
@@ -2780,7 +2951,10 @@ async def get_broadcast_campaign(
     _user: AdminUser = Depends(require_roles("admin", "manager")),
 ) -> BroadcastCampaignDetail:
     """Get detailed progress of a broadcast campaign."""
+    tenant_id = getattr(_user, "tenant_id", None) or "default-system-tenant"
     stmt = select(BroadcastCampaign).where(BroadcastCampaign.id == campaign_id)
+    if not getattr(_user, "is_superadmin", False):
+        stmt = stmt.where(BroadcastCampaign.tenant_id == tenant_id)
     campaign = (await session.execute(stmt)).scalar_one_or_none()
     if not campaign:
         raise HTTPException(status_code=404, detail="Chiến dịch không tồn tại.")
@@ -2794,7 +2968,14 @@ async def start_broadcast_campaign(
     _user: AdminUser = Depends(require_roles("admin", "manager")),
 ) -> dict[str, Any]:
     """Start or resume execution of a broadcast campaign."""
-    service = BroadcastService(session)
+    tenant_id = getattr(_user, "tenant_id", None) or "default-system-tenant"
+    stmt = select(BroadcastCampaign).where(BroadcastCampaign.id == campaign_id)
+    if not getattr(_user, "is_superadmin", False):
+        stmt = stmt.where(BroadcastCampaign.tenant_id == tenant_id)
+    campaign = (await session.execute(stmt)).scalar_one_or_none()
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Chiến dịch không tồn tại.")
+    service = BroadcastService(session, tenant_id=tenant_id)
     return await service.start_campaign(campaign_id)
 
 
@@ -2805,7 +2986,14 @@ async def pause_broadcast_campaign(
     _user: AdminUser = Depends(require_roles("admin", "manager")),
 ) -> dict[str, Any]:
     """Pause an active broadcast campaign."""
-    service = BroadcastService(session)
+    tenant_id = getattr(_user, "tenant_id", None) or "default-system-tenant"
+    stmt = select(BroadcastCampaign).where(BroadcastCampaign.id == campaign_id)
+    if not getattr(_user, "is_superadmin", False):
+        stmt = stmt.where(BroadcastCampaign.tenant_id == tenant_id)
+    campaign = (await session.execute(stmt)).scalar_one_or_none()
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Chiến dịch không tồn tại.")
+    service = BroadcastService(session, tenant_id=tenant_id)
     return await service.pause_campaign(campaign_id)
 
 
@@ -2844,7 +3032,10 @@ async def create_order_shipment(
     _user: AdminUser = Depends(get_current_user),
 ) -> ShipmentDetailResponse:
     """Create waybill with shipping carrier and link tracking code to order."""
+    tenant_id = getattr(_user, "tenant_id", None) or "default-system-tenant"
     stmt = select(Order).where(Order.id == order_id)
+    if not getattr(_user, "is_superadmin", False):
+        stmt = stmt.where(Order.tenant_id == tenant_id)
     order = (await session.execute(stmt)).scalar_one_or_none()
     if not order:
         raise HTTPException(status_code=404, detail="Đơn hàng không tồn tại.")

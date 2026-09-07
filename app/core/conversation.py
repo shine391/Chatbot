@@ -91,11 +91,13 @@ class ConversationManager:
         session: AsyncSession,
         ai_engine: GeminiAIEngine | None = None,
         deduplicator: MessageDeduplicator | None = None,
+        tenant_id: str = "default-system-tenant",
     ) -> None:
         self.session = session
-        self.customer_service = CustomerService(session)
-        self.catalog_service = ProductCatalogService(session)
-        self.settings_service = SettingsService(session)
+        self.tenant_id = tenant_id
+        self.customer_service = CustomerService(session, tenant_id=tenant_id)
+        self.catalog_service = ProductCatalogService(session, tenant_id=tenant_id)
+        self.settings_service = SettingsService(session, tenant_id=tenant_id)
         self.escalation_service = get_shared_escalation_service()
         self.intent_detector = get_shared_intent_detector()
         self.response_builder = get_shared_response_builder()
@@ -113,7 +115,11 @@ class ConversationManager:
         return mapping.get(channel, Platform.WEBSITE)
 
     async def _get_or_create_conversation(
-        self, customer_id: int, channel: str, is_new_customer: bool = False
+        self,
+        customer_id: int,
+        channel: str,
+        is_new_customer: bool = False,
+        tenant_id: str = "default-system-tenant",
     ) -> Conversation:
         if not is_new_customer:
             stmt = (
@@ -131,6 +137,7 @@ class ConversationManager:
                 return conv
 
         conv = Conversation(
+            tenant_id=tenant_id,
             customer_id=customer_id,
             channel=channel,
             status=ConversationStatus.ACTIVE,
@@ -189,6 +196,10 @@ class ConversationManager:
         )
         t1 = time.perf_counter()
         is_new_customer = getattr(customer, "_is_new", False)
+        if customer and customer.tenant_id and customer.tenant_id != self.tenant_id:
+            self.tenant_id = customer.tenant_id
+            self.catalog_service = ProductCatalogService(self.session, tenant_id=customer.tenant_id)
+            self.settings_service = SettingsService(self.session, tenant_id=customer.tenant_id)
 
         # Update customer funnel stage based on message intent
         current_stage = customer.funnel_stage
@@ -198,10 +209,12 @@ class ConversationManager:
             logger.info(f"Customer {customer.id} progressed from {current_stage} to {new_stage}")
 
         # 2. Ensure Conversation exists
+        cust_tenant = getattr(customer, "tenant_id", None) or "default-system-tenant"
         conversation = await self._get_or_create_conversation(
             customer_id=customer.id,
             channel=incoming.channel.value,
             is_new_customer=is_new_customer,
+            tenant_id=cust_tenant,
         )
         t2 = time.perf_counter()
         if (t2 - t0) * 1000.0 > 100.0:
@@ -211,6 +224,7 @@ class ConversationManager:
 
         # 3. Log incoming message to DB
         customer_msg = Message(
+            tenant_id=conversation.tenant_id,
             conversation_id=conversation.id,
             role=MessageRole.CUSTOMER,
             content=incoming.content,
@@ -246,6 +260,7 @@ class ConversationManager:
                         "content": incoming.content,
                         "is_bot_active": conversation.is_bot_active,
                     },
+                    tenant_id=conversation.tenant_id,
                 )
             )
 
@@ -356,6 +371,7 @@ class ConversationManager:
 
         # 6. Log Bot response to DB
         bot_msg = Message(
+            tenant_id=conversation.tenant_id,
             conversation_id=conversation.id,
             role=MessageRole.BOT,
             content=outgoing.content,
@@ -381,6 +397,7 @@ class ConversationManager:
                         "products": outgoing.products,
                         "message_type": outgoing.message_type,
                     },
+                    tenant_id=conversation.tenant_id,
                 )
             )
 

@@ -4,7 +4,16 @@ import enum
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text, TypeDecorator, func
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    ForeignKey,
+    String,
+    Text,
+    TypeDecorator,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database.session import Base
@@ -62,12 +71,15 @@ class SystemSetting(Base):
     """
 
     __tablename__ = "system_settings"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "key", name="uq_system_settings_tenant_key"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     tenant_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("tenants.id", ondelete="CASCADE"), default="default-system-tenant", index=True
     )
-    key: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+    key: Mapped[str] = mapped_column(String(100), unique=False, nullable=False, index=True)
     value: Mapped[str] = mapped_column(Text, nullable=False)
     description: Mapped[str | None] = mapped_column(String(255), nullable=True)
     is_secret: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)

@@ -108,6 +108,7 @@ class FacebookSyncService:
         page_id: str,
         access_token: str,
         max_conversations: int = 50,
+        tenant_id: str = "default-system-tenant",
     ) -> dict[str, Any]:
         """Query Meta Graph API v21.0 to ingest past conversations and messages.
 
@@ -203,11 +204,13 @@ class FacebookSyncService:
                             stmt_cust = select(Customer).where(
                                 Customer.platform == PlatformType.FACEBOOK.value,
                                 Customer.platform_user_id == psid,
+                                Customer.tenant_id == tenant_id,
                             )
                             customer = (await session.execute(stmt_cust)).scalar_one_or_none()
                             is_new_customer = False
                             if not customer:
                                 customer = Customer(
+                                    tenant_id=tenant_id,
                                     platform=PlatformType.FACEBOOK.value,
                                     platform_user_id=psid,
                                     name=cust_name,
@@ -229,6 +232,7 @@ class FacebookSyncService:
                                 .where(
                                     Conversation.customer_id == customer.id,
                                     Conversation.channel == ChannelType.FACEBOOK.value,
+                                    Conversation.tenant_id == tenant_id,
                                 )
                                 .order_by(Conversation.started_at.desc())
                             )
@@ -236,6 +240,7 @@ class FacebookSyncService:
                             is_new_conv = False
                             if not conv_record:
                                 conv_record = Conversation(
+                                    tenant_id=tenant_id,
                                     customer_id=customer.id,
                                     channel=ChannelType.FACEBOOK.value,
                                     status=ConversationStatus.ACTIVE,
@@ -343,6 +348,7 @@ class FacebookSyncService:
                                     conv_started_at = sent_at
 
                                 new_message = Message(
+                                    tenant_id=tenant_id,
                                     conversation_id=conv_id,
                                     role=role,
                                     content=content,
